@@ -2,15 +2,22 @@ package coil
 
 import (
 	"errors"
-	"github.com/felixge/pidctrl"
 	"io/ioutil"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/felixge/pidctrl"
+)
+
+var (
+	ErrLostConn error   = errors.New("lost connection to thermocouple")
+	MaxTempDiff float64 = 100.0
 )
 
 type CoilFrame struct {
@@ -124,21 +131,36 @@ func (c *Coil) Run() {
 	for c.Running {
 		select {
 		case <-clock:
+			oldTemp := c.Temp
 			err = c.updateTemp()
 			if err != nil {
 				c.errLog.Printf("error while updating coil temp: %s\nexiting...\n", err.Error())
+				c.pid.Set(0)
 				c.Stop <- struct{}{}
 			}
+
+			// Make sure the temp hasnt spiked due to tehrmocouple issues
+			if math.Abs(oldTemp-c.Temp) >= MaxTempDiff {
+				c.errLog.Println("lost connection to thermocouple")
+				c.pid.Set(0)
+				c.Stop <- struct{}{}
+			}
+
 			c.FireTime = time.Duration(c.pid.Update(c.Temp)) * time.Millisecond
 			c.infoLog.Printf("pulsing coil: %+v\n", c.FireTime)
 			frameStart := time.Now()
+
+			// Pulse the coil
 			go func() {
 				err = c.OnOff(cancelOnOff, c.FireTime)
 				if err != nil {
 					c.errLog.Printf("error while pulsing coil: %s\nexiting...\n", err.Error())
+					c.pid.Set(0)
 					c.Stop <- struct{}{}
 				}
 			}()
+
+			// Send out this time slice's frame
 			go func() {
 				frame := CoilFrame{
 					Temp:          c.Temp,
@@ -155,10 +177,12 @@ func (c *Coil) Run() {
 				}
 				c.CurrentFrame = frame
 			}()
+
 		case target := <-c.SetTarget:
 			c.pid.Set(target)
 			c.infoLog.Printf("set new target for coil temperature: %.2ff\n", target)
 		case <-c.Stop:
+			c.pid.Set(0)
 			cancelOnOff <- struct{}{}
 			_, err = c.statf.Write([]byte("0"))
 			if err != nil {
@@ -191,17 +215,6 @@ func (c *Coil) updateTemp() error {
 	c.LastUpdated = time.Now()
 	c.infoLog.Printf("updated coil temperature: %.2ff\n", c.Temp)
 	return nil
-}
-
-// Reads the status from the status dev file
-func (c *Coil) status() (bool, error) {
-	_, err := c.statf.Read(c.statb)
-	if err != nil {
-		return false, err
-	}
-	ts := string(c.statb)
-	ts = strings.TrimRightFunc(ts, trimTest)
-	return ts == "1", nil
 }
 
 func (c *Coil) OnOff(cancel chan struct{}, d time.Duration) error {
