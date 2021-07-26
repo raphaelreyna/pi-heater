@@ -37,9 +37,10 @@ type Coil struct {
 
 	window time.Duration
 
-	pid     *pidctrl.PIDController
-	errLog  *log.Logger
-	infoLog *log.Logger
+	pid           *pidctrl.PIDController
+	errLog        *log.Logger
+	infoLog       *log.Logger
+	nonInitialRun bool
 
 	WaitGroup *sync.WaitGroup
 
@@ -140,11 +141,13 @@ func (c *Coil) Run() {
 			}
 
 			// Make sure the temp hasnt spiked due to tehrmocouple issues
-			if math.Abs(oldTemp-c.Temp) >= MaxTempDiff {
+			if math.Abs(oldTemp-c.Temp) >= MaxTempDiff && c.nonInitialRun {
 				c.errLog.Println("lost connection to thermocouple")
 				c.pid.Set(0)
 				c.Stop <- struct{}{}
 			}
+
+			c.nonInitialRun = true
 
 			c.FireTime = time.Duration(c.pid.Update(c.Temp)) * time.Millisecond
 			c.infoLog.Printf("pulsing coil: %+v\n", c.FireTime)
